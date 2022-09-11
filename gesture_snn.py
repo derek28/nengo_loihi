@@ -4,7 +4,7 @@
 
  Filename: local.py
  Author: Kai Zheng
- Date: 08/28/2022
+ Date: 09/04/2022
  Function: localization for SIL Radar sensor array. Using Nengo_loihi.
 
 '''
@@ -21,179 +21,256 @@ from nengo.utils.matplotlib import rasterplot
 import tensorflow as tf
 from tensorflow.keras import layers, models
 
-n_samp = 10000
-n_pts = 250
-n_ant = 3
+seed = 2
+np.random.seed(seed)
+rng = np.random.RandomState(seed)
+#tf.random.set_seed(seed)
 
-n_sig_pts = n_pts * n_ant
+t_sim = 1.5
 
-#n_step = 1000
-t_sim = 1.0
-dt = 0.001
-n_step = int(t_sim / dt)
+n_samp = 1200
+n_pts = 500
+n_chan = 6
+
+n_signal = n_pts * n_chan
 
 n_train = int(0.8 * n_samp)
 n_test = n_samp - n_train
 
-x_data = np.zeros((n_samp, n_step, n_ant))   # S_n[t] 
-y_data = np.zeros((n_samp, n_step, 1))   #  coordinate <x[t], y[t]>
-
-# expand a frame with 180 points to 1500 points. a - normalize to -1 to 1. 
-def expand_frame(frame, n_in=250, n_out=1000, a=1.8):
-    n_sel = np.linspace(0, n_in-1, n_out)
-    n_sel = n_sel.astype('int')
-    return (a * frame[n_sel])
+x_data = np.zeros((n_samp, n_signal))   #  nengo dl only accepts 1D data type
+y_data = np.zeros((n_samp, 1))   #  gesture label
 
 # process the raw data
-with open("gesture_8_10000.txt", "r")  as in_file:
+with open("gesture_real_12_1200.txt", "r")  as in_file:
     data_lines = in_file.readlines()
 
 for i in range(n_samp):
     line = data_lines[i]
-    items = np.array(line.split(","))
-    items = items.astype(np.float64)
+    items = np.array(line.split(" "))
+    items = items.astype(int)
+    
+    #dat = np.reshape(items[:n_signal], (n_pts, n_chan), 'F')
+    #dat = np.transpose(dat)
+    #dat = np.reshape(dat, (1, -1))
+    x_data[i, :] = items[:n_signal]
+    #x_data[i, :] = dat
+    y_data[i] = items[n_signal]    # 0-11 for sparse_catogorial_enthropy
 
-    for j in range(n_ant):
-        frame_ex = expand_frame(items[j*n_pts : (j+1)*n_pts], n_pts, n_step)
-        x_data[i, :, j] = frame_ex
-    y_data[i, :, 0] = items[n_sig_pts]-1    # 0-7 for sparse_catogorial_enthropy
+
+# first random permutation
+perm = rng.permutation(x_data.shape[0])
+x_data = x_data[perm, :]
+y_data = y_data[perm]
 
 # divide the dataset into training and testing group
-x_train = x_data[:n_train, :, :]
-y_train = y_data[:n_train, :, :]
-x_test = x_data[n_train:, :, :]
-y_test = y_data[n_train:, :, :]
+x_train = x_data[:n_train, :]
+y_train = y_data[:n_train, :]
+x_test = x_data[n_train:, :]
+y_test = y_data[n_train:, :]
 
-# Build a neural network
-net = nengo.Network(label="Gesture Recognition Neurons")
-with net:
-    nengo_dl.configure_settings(trainable=True)
-    net.config[nengo.Ensemble].max_rates = nengo.dists.Choice([100])
-    net.config[nengo.Ensemble].intercepts = nengo.dists.Choice([0])
-    net.config[nengo.Connection].synapse = None
-    neuron_type = nengo.LIF(amplitude=0.01)
-    #neuron_type = nengo.SpikingRectifiedLinear(amplitude=0.01)
-    
-    nengo_dl.configure_settings(stateful=False)
-    
-    # input shape n_ant * n_step * 1
-    inp = nengo.Node(np.zeros(n_ant))
+# generating more training data by timeshifting original samples
+x_train_shift_1 = np.roll(x_train, -50, axis=1)
+x_train_shift_1[:, -50:] = 0
+x_train_shift_2 = np.roll(x_train, 20, axis=1)
+x_train_shift_2[:, :20] = 0
 
-    # add a to-spike layer 
-    encoders=[
-        [1,  0,  0],
-        [-1, 0,  0],
-        [0,  1,  0],
-        [0, -1,  0],
-        [0,  0,  1],
-        [0,  0, -1],
-    ] 
-    
-    #to_spike = nengo_dl.TensorNode(tf.keras.layers.Dense(6), pass_time=False, shape_in=(3, ))    
-    to_spike = nengo.Ensemble(
-        n_neurons=6,
-        dimensions=3,
-        encoders=encoders
-    ) 
-    conn_in_spk = nengo.Connection(inp, to_spike, synapse=None)
-    net.config[conn_in_spk].trainable = False
+x_train = np.concatenate((x_train, x_train_shift_1, x_train_shift_2), axis=0)
+#x_train = np.concatenate((x_train, x_train_shift_1), axis=0)
+y_train = np.tile(y_train, (3, 1))
+#y_train = np.tile(y_train, (2, 1))
 
-    delay0 = nengo_dl.TensorNode(tf.keras.layers.Dense(80), pass_time=False, shape_in=(6, ))
-    conn_in_0 = nengo.Connection(to_spike.neurons, delay0, synapse=None)
-    conn_in_1 = nengo.Connection(to_spike.neurons, delay0, synapse=0.04)
-    delay0 = nengo_dl.Layer(neuron_type)(delay0)
+# Second permutation
+perm = rng.permutation(x_train.shape[0])
+x_train = x_train[perm, :]
+y_train = y_train[perm]
 
-    delay1 = nengo_dl.TensorNode(tf.keras.layers.Dense(80), pass_time=False, shape_in=(80, ))
-    conn_d01_0 = nengo.Connection(delay0, delay1, synapse=None)
-    conn_d01_1 = nengo.Connection(delay0, delay1, synapse=0.08)
-    delay1 = nengo_dl.Layer(neuron_type)(delay1)
+#perm = rng.permutation(x_test.shape[0])
+#x_test = x_test[perm, :]
+#y_test = y_test[perm]
 
-    delay2 = nengo_dl.TensorNode(tf.keras.layers.Dense(80), pass_time=False, shape_in=(80, ))
-    conn_d12_0 = nengo.Connection(delay1, delay2, synapse=None)
-    conn_d12_1 = nengo.Connection(delay1, delay2, synapse=0.16)
-    delay2 = nengo_dl.Layer(neuron_type)(delay2)
 
-    delay3 = nengo_dl.TensorNode(tf.keras.layers.Dense(80), pass_time=False, shape_in=(80, ))
-    conn_d23_0 = nengo.Connection(delay2, delay3, synapse=None)
-    conn_d23_1 = nengo.Connection(delay2, delay3, synapse=0.32)
-    delay3 = nengo_dl.Layer(neuron_type)(delay3)
+t_range = np.linspace(0, t_sim, n_pts)
+spikes = np.reshape(x_train[0], (n_pts, n_chan), 'F')
+#print(t_range.shape)
+#print(spikes.shape)
+#plt.figure()
+#rasterplot(t_range, spikes)
+#plt.title(str(y_train[0]))
+#plt.show()
 
-#    delay4 = nengo_dl.TensorNode(tf.keras.layers.Dense(80), pass_time=False, shape_in=(80, ))
-#    conn_d34_0 = nengo.Connection(delay3, delay4, synapse=None)
-#    conn_d34_1 = nengo.Connection(delay3, delay4, synapse=0.32)
-#    delay4 = nengo_dl.Layer(neuron_type)(delay4)
+x_train = x_train[:, None, :]
+y_train = y_train[:, None, :]
+x_test = x_test[:, None, :]
+y_test = y_test[:, None, :]
 
-    outp = nengo_dl.TensorNode(tf.keras.layers.Dense(8), pass_time=False, shape_in=(80, ))
-    nengo.Connection(delay3, outp)
+print(x_train.shape)
+print(y_train.shape)
 
-    inp_probe = nengo.Probe(inp, label="inp_p")
-    to_spike_probe = nengo.Probe(to_spike.neurons, label="to_spike_p")
-    delay0_probe = nengo.Probe(delay0[0:10], label='delay0')
-    delay3_probe = nengo.Probe(delay3[0:10], label='delay4')
-    out_probe = nengo.Probe(outp, label="out_p")
-    out_probe_filt = nengo.Probe(outp, synapse=0.16, label="out_p_filt")
+# Build a CNN using Tensorflow first
+inp = tf.keras.Input(shape=(6, 500, 1), name="input")
 
-minibatch_size = 200
-sim = nengo_dl.Simulator(net, dt=dt, minibatch_size=minibatch_size)
+to_spikes = layers.Activation(tf.nn.relu)(inp)
+
+pool0 = layers.AveragePooling2D((1, 2))(to_spikes)
+
+conv0 = layers.Conv2D(
+    filters=32, 
+    kernel_size=(1, 16),
+    #strides=(2, 1),
+    activation=tf.nn.relu,
+)(pool0)
+
+# Max Pooling Layer 0
+pool1 = layers.AveragePooling2D((1, 4))(conv0)
+
+# Convolutional Layer 1 
+conv1 = layers.Conv2D(
+    filters=32,
+    kernel_size=(3, 16),
+    activation=tf.nn.relu,
+)(pool1)
+
+pool2 = layers.AveragePooling2D((1, 2))(conv1)
+
+# Convolutional Layer 2 
+conv2 = layers.Conv2D(
+    filters=48,
+    kernel_size=(4, 8),
+    activation=tf.nn.relu,
+)(pool2)
+
+# Max Pooling Layer 1
+#pool3 = layers.AveragePooling2D((1, 2))(conv2)
+
+# Flatten
+flatten = layers.Flatten()(conv2)
+
+# Dense layer 0
+dense = layers.Dense(180, 
+    activation=tf.nn.relu,
+)(flatten)
+
+# Output Layer (Dense)
+outp = layers.Dense(12)(dense)
+
+model = models.Model(inputs=inp, outputs=outp)
+model.summary()
+
+# NengoDL Converter. Keras --> Nengo
+converter = nengo_dl.Converter(model)
 
 do_training = True
 if do_training:
-    sim.compile(
-        optimizer=tf.optimizers.RMSprop(0.001),
-        loss = {out_probe: tf.losses.SparseCategoricalCrossentropy(from_logits=True)}
+    with nengo_dl.Simulator(converter.net, minibatch_size=20) as sim:
+        # run training
+        sim.compile(
+            optimizer=tf.optimizers.Adam(0.001),
+            loss=tf.losses.SparseCategoricalCrossentropy(from_logits=True),
+            metrics=[tf.metrics.sparse_categorical_accuracy],
+        )
+        sim.fit(
+            {converter.inputs[inp]: x_train},
+            {converter.outputs[outp]: y_train},
+            validation_data=(
+                {converter.inputs[inp]: x_test},
+                {converter.outputs[outp]: y_test},
+            ),
+            epochs=10,
+        )
+
+        # save the parameters to file
+        sim.save_params("./gesture_snn_params")
+
+def run_network(
+    activation,
+    params_file="gesture_snn_params",
+    n_steps=30,
+    scale_firing_rates=1,
+    synapse=None,
+    n_test=400,
+):
+    # convert the keras model to a nengo network
+    nengo_converter = nengo_dl.Converter(
+        model,
+        swap_activations={tf.nn.relu: activation},
+        scale_firing_rates=scale_firing_rates,
+        synapse=synapse,
     )
-    sim.fit(x_train, {out_probe: y_train}, epochs=10)
 
-    # save the parameters
-    sim.save_params("./gesture_snn_params")
-else:
-    sim.load_params("./gesture_snn_params")
+    # get input/output objects
+    nengo_input = nengo_converter.inputs[inp]
+    nengo_output = nengo_converter.outputs[outp]
 
-
-def classification_accuracy(y_true, y_pred):
-    return tf.metrics.sparse_categorical_accuracy(y_true[:, -1], y_pred[:, -1])
-    
-sim.compile(loss={out_probe_filt: classification_accuracy})
-print(
-    "Accuracy after training:",
-    sim.evaluate(x_test, {out_probe_filt: y_test})["loss"], 
+    # add a probe to the first convolutional layer to record activity.
+    # we'll only record from a subset of neurons, to save memory.
+    sample_neurons = np.linspace(
+        0,
+        np.prod(conv2.shape[1:]),
+        200,
+        endpoint=False,
+        dtype=np.int32,
     )
+    with nengo_converter.net:
+        conv_probe = nengo.Probe(nengo_converter.layers[conv2][sample_neurons])
 
+    # repeat inputs for some number of timesteps
+    tiled_x_test = np.tile(x_test, (1, n_steps, 1))
 
-data = sim.predict(x_test[:minibatch_size])
+    # set some options to speed up simulation
+    with nengo_converter.net:
+        nengo_dl.configure_settings(stateful=False)
 
-print(data[to_spike_probe].shape)
-print(data[inp_probe].shape)
-print(data[out_probe].shape)
-print(data[out_probe_filt].shape)
+    # build network, load in trained weights, run inference on test images
+    with nengo_dl.Simulator(
+        nengo_converter.net, minibatch_size=10, progress_bar=False
+    ) as nengo_sim:
+        nengo_sim.load_params(params_file)
+        data = nengo_sim.predict({nengo_input: tiled_x_test})
 
-t_range = np.linspace(0, 1, n_step)
+    # compute accuracy on test data, using output of network on
+    # last timestep
+    predictions = np.argmax(data[nengo_output][:, -1], axis=-1)
+    accuracy = (predictions == y_test[:, 0, 0]).mean()
+    print(f"Test accuracy: {100 * accuracy:.2f}%")
 
-fr = 0
+    # plot the results
+    for ii in range(3):
+        spikes = np.reshape(x_test[ii], (n_pts, n_chan), 'F')
+        
+        plt.figure(figsize=(12, 4))
 
-plt.figure()
-rasterplot(t_range, data[to_spike_probe][fr])
-plt.title("To-Spike Probe")
+        plt.subplot(1, 3, 1)
+        plt.title("Input Spikes")
+        rasterplot(t_range, spikes)
 
-plt.figure()
-rasterplot(t_range, data[delay0_probe][fr])
-plt.title("Delay0 Probe")
+        plt.subplot(1, 3, 2)
+        scaled_data = data[conv_probe][ii] * scale_firing_rates
+        if isinstance(activation, nengo.SpikingRectifiedLinear):
+            scaled_data *= 0.001
+            rates = np.sum(scaled_data, axis=0) / (n_steps * nengo_sim.dt)
+            plt.ylabel("Number of spikes")
+        else:
+            rates = scaled_data
+            plt.ylabel("Firing rates (Hz)")
+        plt.xlabel("Timestep")
+        plt.title(
+            f"Neural activities (conv0 mean={rates.mean():.1f} Hz, "
+            f"max={rates.max():.1f} Hz)"
+        )
+        plt.plot(scaled_data)
 
-plt.figure()
-rasterplot(t_range, data[delay3_probe][fr])
-plt.title("Delay3 Probe")
+        plt.subplot(1, 3, 3)
+        plt.title("Output predictions")
+        plt.plot(tf.nn.softmax(data[nengo_output][ii]))
+        plt.legend([str(j) for j in range(12)], loc="upper left")
+        plt.xlabel("Timestep")
+        plt.ylabel("Probability")
 
-for fr in range(4):
-    plt.figure(figsize=(8, 4))
-    plt.subplot(1, 2, 1)
-    for i in range(n_ant):
-        dat = data[inp_probe][fr][:, i] + (n_ant - i)
-        plt.plot(t_range, dat)
-    
-    plt.subplot(1, 2, 2)
-    plt.plot(t_range, tf.nn.softmax(data[out_probe_filt][fr]))
-    plt.legend([str(i) for i in range(8)], loc="upper left")
-    plt.ylabel("probability")
-    plt.title("Gesture"+str(y_test[fr, 0, 0]))
+        plt.tight_layout()
+        
+#run_network(activation=nengo.RectifiedLinear(), n_steps=10)
+
+run_network(activation=nengo.SpikingRectifiedLinear(), scale_firing_rates=75, 
+    n_steps=50, synapse=0.01)
+
 plt.show()
-
