@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 
 import nengo
 import nengo_dl
-import nengo_loihi
+# import nengo_loihi
 from nengo.dists import Uniform
 from nengo.utils.matplotlib import rasterplot
 
