@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 
 import nengo
 import nengo_dl
-# import nengo_loihi
+import nengo_loihi
 from nengo.dists import Uniform
 from nengo.utils.matplotlib import rasterplot
 
@@ -28,7 +28,7 @@ rng = np.random.RandomState(seed)
 
 t_sim = 1.5
 
-n_samp = 1200
+n_samp = 2400
 n_pts = 500
 n_chan = 6
 
@@ -41,7 +41,7 @@ x_data = np.zeros((n_samp, n_signal))   #  nengo dl only accepts 1D data type
 y_data = np.zeros((n_samp, 1))   #  gesture label
 
 # process the raw data
-with open("gesture_real_12_1200.txt", "r")  as in_file:
+with open("gesture_real_12_2400.txt", "r")  as in_file:
     data_lines = in_file.readlines()
 
 for i in range(n_samp):
@@ -74,10 +74,10 @@ x_train_shift_1[:, -50:] = 0
 x_train_shift_2 = np.roll(x_train, 20, axis=1)
 x_train_shift_2[:, :20] = 0
 
-x_train = np.concatenate((x_train, x_train_shift_1, x_train_shift_2), axis=0)
-#x_train = np.concatenate((x_train, x_train_shift_1), axis=0)
-y_train = np.tile(y_train, (3, 1))
-#y_train = np.tile(y_train, (2, 1))
+#x_train = np.concatenate((x_train, x_train_shift_1, x_train_shift_2), axis=0)
+x_train = np.concatenate((x_train, x_train_shift_1), axis=0)
+#y_train = np.tile(y_train, (3, 1))
+y_train = np.tile(y_train, (2, 1))
 
 # Second permutation
 perm = rng.permutation(x_train.shape[0])
@@ -233,6 +233,10 @@ def run_network(
     accuracy = (predictions == y_test[:, 0, 0]).mean()
     print(f"Test accuracy: {100 * accuracy:.2f}%")
 
+    # Confusion matrix
+    confusion_mat = tf.math.confusion_matrix(y_test[:, 0, 0], predictions)
+    print(confusion_mat)
+
     # plot the results
     for ii in range(3):
         spikes = np.reshape(x_test[ii], (n_pts, n_chan), 'F')
@@ -270,7 +274,7 @@ def run_network(
         
 #run_network(activation=nengo.RectifiedLinear(), n_steps=10)
 
-run_network(activation=nengo.SpikingRectifiedLinear(), scale_firing_rates=75, 
-    n_steps=50, synapse=0.01)
+run_network(activation=nengo.SpikingRectifiedLinear(), scale_firing_rates=33, 
+    n_steps=60, synapse=0.01)
 
 plt.show()
