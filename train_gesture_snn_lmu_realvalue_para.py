@@ -6,7 +6,6 @@ import numpy as np
 import tensorflow as tf
 import nengo_dl
 import os
-import nengo_loihi
 
 # set seed to ensure this example is reproducible
 seed = 0
@@ -54,6 +53,36 @@ y_train = y_data[:n_train]
 x_test = x_data[n_train:]
 y_test = y_data[n_train:]
 
+# data augmentation
+aug_ratio = 4
+smax = 50
+x_train_aug = np.zeros((n_train*aug_ratio,n_pts,n_chan))
+for i in range(n_train):
+    ls = -(n_pts-1)
+    rs = n_pts-1
+    for j in range(n_chan):
+        pidx = np.where(x_train[i,:,j]>0)[0]
+        if pidx.shape[0] > 0:
+            if ls < -pidx[0]:
+                ls = -pidx[0]
+            if rs > n_pts-1-pidx[-1]:
+                rs = n_pts-1-pidx[-1]
+    if ls < -smax:
+        ls = -smax
+    if rs > smax:
+        rs = smax
+    sran = np.concatenate((np.array(range(ls,0)), np.array(range(1,rs+1))), axis=0)
+    sval = np.random.choice(sran, aug_ratio, replace=False)
+    for j in range(aug_ratio):
+        x_train_aug[(j-1)*n_train+i:(j-1)*n_train+i+1,:,:] = np.roll(x_train[i:i+1,:,:],sval[j],axis=1)
+
+x_train = np.concatenate((x_train, x_train_aug), axis=0)
+y_train = np.tile(y_train, (aug_ratio+1,1,1))
+n_train = x_train.shape[0]
+
+dt = 0.004
+max_rate = 1/dt
+amp = 1.0 / max_rate
 class LMUCell(nengo.Network):
     def __init__(self, hd, md, theta, xd, xn, **kwargs):
         super().__init__(**kwargs)
@@ -77,10 +106,11 @@ class LMUCell(nengo.Network):
             # create objects corresponding to the x/u/m/h variables in the above diagram
             self.x = [nengo.Node(size_in=xn, label='Node_x%d'%i) for i in range(xd)]
             self.u = [nengo.Node(size_in=1, label='Node_u%d'%i) for i in range(xd)]
-            # self.u = [nengo_dl.TensorNode(tf.nn.tanh, shape_in=(1,), pass_time=False) for _ in range(xd)]
             self.m = [nengo.Node(size_in=md, label='Node_m%d'%i) for i in range(xd)]
-            # self.h = nengo_dl.TensorNode(tf.nn.tanh, shape_in=(hd,), pass_time=False)
-            self.h = nengo.Ensemble(hd, 1, neuron_type=nengo.Tanh(tau_ref=1), gain=np.ones(hd), bias=np.zeros(hd)).neurons
+            self.h = nengo_dl.TensorNode(tf.nn.tanh, shape_in=(hd,), pass_time=False)
+            # self.h = nengo.Ensemble(hd, 1, neuron_type=nengo.Tanh(tau_ref=1), gain=np.ones(hd), bias=np.zeros(hd)).neurons
+            # self.h = nengo.Ensemble(hd, 1, max_rates=nengo.dists.Choice([max_rate]), neuron_type=nengo.SpikingRectifiedLinear(amplitude=amp), gain=np.ones(hd), bias=np.zeros(hd))
+            # self.h = nengo.Ensemble(hd, 1, neuron_type=nengo.RectifiedLinear(), gain=np.ones(hd), bias=np.zeros(hd))
 
             # compute u_t from the above diagram. we have removed e_h and e_m as they
             # are not needed in this task.
@@ -102,20 +132,29 @@ class LMUCell(nengo.Network):
                 self.config[conn_B[i]].trainable = False
 
             # compute h_t
+            # for i in range(xd):
+            #     nengo.Connection(
+            #         self.x[i], self.h, transform=nengo_dl.dists.Glorot(), synapse=None
+            #     )
+            # nengo.Connection(
+            #     self.h, self.h, transform=nengo_dl.dists.Glorot(), synapse=0
+            # )
+            # for i in range(xd):
+            #     nengo.Connection(
+            #         self.m[i],
+            #         self.h,
+            #         transform=nengo_dl.dists.Glorot(),
+            #         synapse=None,
+            #     )
             for i in range(xd):
                 nengo.Connection(
-                    self.x[i], self.h, transform=nengo_dl.dists.Glorot(), synapse=None
+                    self.x[i], self.h, transform=nengo.Dense((hd,xn), init=nengo_dl.dists.Glorot()), synapse=None
                 )
             nengo.Connection(
-                self.h, self.h, transform=nengo_dl.dists.Glorot(), synapse=0
+                self.h, self.h, transform=nengo.Dense((hd,hd), init=nengo_dl.dists.Glorot()), synapse=0
             )
             for i in range(xd):
-                nengo.Connection(
-                    self.m[i],
-                    self.h,
-                    transform=nengo_dl.dists.Glorot(),
-                    synapse=None,
-                )
+                nengo.Connection(self.m[i], self.h, transform=nengo.Dense((hd,md), init=nengo_dl.dists.Glorot()), synapse=None)
 
 with nengo.Network() as net:
     # remove some unnecessary features to speed up the training
@@ -152,28 +191,44 @@ with nengo.Network() as net:
     # on this task)
     p = nengo.Probe(out)
 
+do_training = True
 n_epoch = 80
-x_train_dict = {}
-for i in range(n_chan):
-    # x_train_dict[inp[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream)).max(2)[:,:,None]
-    x_train_dict[inp[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream))
-x_test_dict = {}
-for i in range(n_chan):
-    # x_test_dict[inp[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream)).max(2)[:,:,None]
-    x_test_dict[inp[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream))
-
-model_name = 'model_wiaug#4_memory#50_parallel#5'
+model_name = 'model_wiaug#4_memory#50_parallel#5_ensemble'
 if not os.path.exists('./weights/%s'%model_name):
     os.mkdir('./weights/%s'%model_name)
 
-with nengo_loihi.Simulator(net, minibatch_size=120, unroll_simulation=10) as sim:
+with nengo_dl.Simulator(net, minibatch_size=120, unroll_simulation=10) as sim:
     sim.compile(
         loss=tf.losses.SparseCategoricalCrossentropy(from_logits=True),
         optimizer=tf.optimizers.Adam(),
         metrics=["accuracy"],
     )
     sim.keras_model.summary()
-    sim.load_params("./weights/%s/params_epoch#070"%model_name)
+
+    x_train_dict = {}
+    for i in range(n_chan):
+        # x_train_dict[inp[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream)).max(2)[:,:,None]
+        x_train_dict[inp[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream))
+    x_test_dict = {}
+    for i in range(n_chan):
+        # x_test_dict[inp[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream)).max(2)[:,:,None]
+        x_test_dict[inp[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream))
+
+    test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
+    print(f"Initial test accuracy: {test_acc * 100:.2f}%")
+
+    if do_training:
+        for i_epoch in range(n_epoch):
+            print("Epoch #%03d:"%i_epoch)
+            sim.fit(x_train_dict, y_train, epochs=1, stateful=True)
+            sim.save_params("./weights/%s/params_epoch#%03d"%(model_name,i_epoch))
+            test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
+            print(f"Test accuracy: {test_acc * 100:.2f}%")
+        sim.save_params("./weights/%s/params_final"%model_name)
+    else:
+        sim.load_params("./weights/%s/params_epoch#070"%model_name)
 
     test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
     print(f"Final test accuracy: {test_acc * 100:.2f}%")
+    # test_result = sim.predict(x_test_dict)
+    # print(test_result[p][0])

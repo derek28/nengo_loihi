@@ -14,7 +14,7 @@ np.random.seed(seed)
 
 unroll_factor = 10
 n_samp = 2400
-n_pts = 500
+n_pts = 1500
 n_stream = 5
 n_step = int(np.ceil(n_pts/n_stream))
 n_step = int(np.ceil(n_step/unroll_factor))*unroll_factor
@@ -29,7 +29,7 @@ x_data = np.zeros((n_samp,n_pts*n_chan))
 y_data = np.zeros((n_samp,1))
 
 # process the raw data
-with open("gesture_real_12_2400.txt", "r")  as in_file:
+with open("gesture_2400_1ms.txt", "r")  as in_file:
     data_lines = in_file.readlines()
 
 for i in range(n_samp):
@@ -78,8 +78,24 @@ for i in range(n_train):
 
 x_train = np.concatenate((x_train, x_train_aug), axis=0)
 y_train = np.tile(y_train, (aug_ratio+1,1,1))
-n_train = x_train.shape[0]
 
+x_test = x_test[:1]
+y_test = y_test[:1]
+n_train = x_train.shape[0]
+n_test = x_test.shape[0]
+
+dt = 0.001
+max_rate = 250
+amp = 1.0/max_rate
+gain = max_rate
+neuron_type = nengo.SpikingRectifiedLinear(amplitude=1/max_rate)
+# neuron_type = nengo.RegularSpiking(nengo.Tanh(tau_ref=amp),amplitude=amp)
+# gain = 1.0
+# neuron_type = nengo.SpikingRectifiedLinear()
+tau = 0.1
+nu = 10
+nm = 10
+nh = 10
 class LMUCell(nengo.Network):
     def __init__(self, hd, md, theta, xd, xn, **kwargs):
         super().__init__(**kwargs)
@@ -95,24 +111,32 @@ class LMUCell(nengo.Network):
         C = np.ones((1, md))
         D = np.zeros((1,))
 
-        A, B, _, _, _ = cont2discrete((A, B, C, D), dt=1.0, method="zoh")
+        # A, B, _, _, _ = cont2discrete((A, B, C, D), dt=1.0, method="zoh")
+        A = A*tau+np.eye(md)
+        B = B*tau
 
         with self:
             nengo_dl.configure_settings(trainable=None)
 
             # create objects corresponding to the x/u/m/h variables in the above diagram
-            self.x = [nengo.Node(size_in=xn, label='Node_x%d'%i) for i in range(xd)]
-            self.u = [nengo.Node(size_in=1, label='Node_u%d'%i) for i in range(xd)]
-            # self.u = [nengo_dl.TensorNode(tf.nn.tanh, shape_in=(1,), pass_time=False) for _ in range(xd)]
-            self.m = [nengo.Node(size_in=md, label='Node_m%d'%i) for i in range(xd)]
-            self.h = nengo_dl.TensorNode(tf.nn.tanh, shape_in=(hd,), pass_time=False)
-            # self.h = nengo.Ensemble(hd, 1, neuron_type=nengo.Tanh(tau_ref=1), gain=np.ones(hd), bias=np.zeros(hd)).neurons
+            self.x = [nengo.Node(np.zeros(xn), label='X%d'%i) for i in range(xd)]
+            self.u = [nengo.Ensemble(nu, 1, neuron_type=neuron_type, gain=gain*np.ones(nu), bias=np.zeros(nu), label='U%d'%i) for i in range(xd)]
+            self.m = [nengo.networks.EnsembleArray(nm, md, neuron_type=neuron_type, gain=gain*np.ones(nm), bias=np.zeros(nm), label='M%d'%i) for i in range(xd)]
+            self.h = nengo.networks.EnsembleArray(nh, hd, neuron_type=neuron_type, gain=gain*np.ones(nh), bias=np.zeros(nh), label='H')
+            self.o = nengo.networks.EnsembleArray(nh, hd, neuron_type=neuron_type, gain=gain*np.ones(nh), bias=np.zeros(nh), label='O')
+
+            # for i in range(xd):
+            #     self.config[self.u[i]].trainable = False
+            # for i in range(xd):
+            #     for j in range(md):
+            #         self.config[self.m[i].ea_ensembles[j]].trainable = False
+            # for i in range(hd):
+            #     self.config[self.h.ea_ensembles[i]].trainable = False
+            #     self.config[self.o.ea_ensembles[i]].trainable = False
 
             # compute u_t from the above diagram. we have removed e_h and e_m as they
             # are not needed in this task.
-            conn_inp = [nengo.Connection(self.x[i], self.u[i], transform=np.ones((1,xn)), synapse=None) for i in range(xd)]
-            # conn_mu = [nengo.Connection(self.m[i], self.u[i], transform=nengo_dl.dists.Glorot(), synapse=0) for i in range(xd)]
-            # conn_hu = [nengo.Connection(self.h[i], self.u[i], transform=nengo_dl.dists.Glorot(), synapse=0) for i in range(xd)]
+            conn_inp = [nengo.Connection(self.x[i], self.u[i], transform=np.ones((1,xn)), synapse=tau) for i in range(xd)]
 
             # compute m_t
             # in this implementation we'll make A and B non-trainable, but they
@@ -120,71 +144,66 @@ class LMUCell(nengo.Network):
             # note that setting synapse=0 (versus synapse=None) adds a one-timestep
             # delay, so we can think of any connections with synapse=0 as representing
             # value_{t-1}.
-            conn_A = [nengo.Connection(self.m[i], self.m[i], transform=A, synapse=0) for i in range(xd)]
+            conn_A = [nengo.Connection(self.m[i].output, self.m[i].input, transform=A, synapse=tau) for i in range(xd)]
             for i in range(xd):
                 self.config[conn_A[i]].trainable = False
-            conn_B = [nengo.Connection(self.u[i], self.m[i], transform=B, synapse=None) for i in range(xd)]
+            conn_B = [nengo.Connection(self.u[i], self.m[i].input, transform=B, synapse=tau) for i in range(xd)]
             for i in range(xd):
                 self.config[conn_B[i]].trainable = False
 
             # compute h_t
             for i in range(xd):
                 nengo.Connection(
-                    self.x[i], self.h, transform=nengo_dl.dists.Glorot(), synapse=None
+                    self.x[i], self.h.input, transform=nengo.Dense((hd,xn), init=nengo_dl.dists.Glorot()), synapse=tau
                 )
-            nengo.Connection(
-                self.h, self.h, transform=nengo_dl.dists.Glorot(), synapse=0
-            )
             for i in range(xd):
-                nengo.Connection(
-                    self.m[i],
-                    self.h,
-                    transform=nengo_dl.dists.Glorot(),
-                    synapse=None,
+                nengo.Connection(self.m[i].output, self.h.input, transform=nengo.Dense((hd,md), init=nengo_dl.dists.Glorot()), synapse=tau)
+            nengo.Connection(
+                self.o.output, self.h.input, transform=nengo.Dense((hd,hd), init=nengo_dl.dists.Glorot()), synapse=tau
+            )
+            for i in range(hd):
+                conn_H = nengo.Connection(
+                    self.h.ea_ensembles[i], self.o.ea_ensembles[i], function = lambda x: np.tanh(x), synapse=tau
                 )
+                self.config[conn_H].trainable = False
 
 with nengo.Network() as net:
     # remove some unnecessary features to speed up the training
     nengo_dl.configure_settings(
         trainable=None,
-        stateful=True,
-        keep_history=False,
+        stateful=False,
+        keep_history=True,
+        learning_phase=True
     )
-
-    n_inp = n_stream
-    # input node
-    inp = [nengo.Node(np.zeros(n_inp), label='Node_i%d'%i) for i in range(n_chan)]
 
     # lmu cell
     lmu = LMUCell(
         hd=100,
         md=50,
-        theta=n_step,
+        theta=n_step*dt,
         xd=n_chan,
-        xn=n_inp
+        xn=n_stream
     )
-    # net.config[lmu.h].trainable = False
-
-    conn = [nengo.Connection(inp[i], lmu.x[i], synapse=None) for i in range(n_chan)]
-    for i in range(n_chan):
-        net.config[conn[i]].trainable = False
-
+    
     # dense linear readout
-    out = nengo.Node(size_in=n_label, label='Node_out')
-    nengo.Connection(lmu.h, out, transform=nengo_dl.dists.Glorot(), synapse=None)
+    out = nengo.Node(size_in=n_label, label='Out')
+    nengo.Connection(lmu.o.output, out, transform=nengo_dl.dists.Glorot(), synapse=tau)
 
     # record output. note that we set keep_history=False above, so this will
     # only record the output on the last timestep (which is all we need
     # on this task)
+    px = nengo.Probe(lmu.x[0])
+    pu = nengo.Probe(lmu.u[0])
+    pm = nengo.Probe(lmu.m[0].ea_ensembles[0])
     p = nengo.Probe(out)
 
 do_training = False
-n_epoch = 80
-model_name = 'model_wiaug#4_memory#50_parallel#5'
+n_epoch = 44
+model_name = 'model_dt1ms_wiaug#4_memory#50_parallel#5_trainrate_testspike_ensemblearray'
 if not os.path.exists('./weights/%s'%model_name):
     os.mkdir('./weights/%s'%model_name)
 
-with nengo_dl.Simulator(net, minibatch_size=120, unroll_simulation=10) as sim:
+with nengo_dl.Simulator(net, dt=dt, minibatch_size=1, unroll_simulation=10) as sim:
     sim.compile(
         loss=tf.losses.SparseCategoricalCrossentropy(from_logits=True),
         optimizer=tf.optimizers.Adam(),
@@ -195,27 +214,35 @@ with nengo_dl.Simulator(net, minibatch_size=120, unroll_simulation=10) as sim:
     x_train_dict = {}
     for i in range(n_chan):
         # x_train_dict[inp[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream)).max(2)[:,:,None]
-        x_train_dict[inp[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream))
+        x_train_dict[lmu.x[i]] = np.pad(x_train[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_train,-1,n_stream))
     x_test_dict = {}
     for i in range(n_chan):
         # x_test_dict[inp[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream)).max(2)[:,:,None]
-        x_test_dict[inp[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream))
+        x_test_dict[lmu.x[i]] = np.pad(x_test[:,:,i:i+1],((0,0),(0,n_step*n_stream-n_pts),(0,0))).reshape((n_test,-1,n_stream))
 
-    test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
-    print(f"Initial test accuracy: {test_acc * 100:.2f}%")
+    # test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
+    # print(f"Initial test accuracy: {test_acc * 100:.2f}%")
 
     if do_training:
         for i_epoch in range(n_epoch):
             print("Epoch #%03d:"%i_epoch)
-            sim.fit(x_train_dict, y_train, epochs=1, stateful=True)
+            sim.fit(x_train_dict, y_train, epochs=1, stateful=False)
             sim.save_params("./weights/%s/params_epoch#%03d"%(model_name,i_epoch))
             test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
             print(f"Test accuracy: {test_acc * 100:.2f}%")
         sim.save_params("./weights/%s/params_final"%model_name)
     else:
-        sim.load_params("./weights/%s/params_epoch#070"%model_name)
+        sim.load_params("./weights/%s/params_epoch#%03d"%(model_name,n_epoch-1))
 
-    test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
-    print(f"Final test accuracy: {test_acc * 100:.2f}%")
+    # test_acc = sim.evaluate(x_test_dict, y_test, verbose=0)["probe_accuracy"]
+    # print(f"Final test accuracy: {test_acc * 100:.2f}%")
     # test_result = sim.predict(x_test_dict)
     # print(test_result[p][0])
+
+    test_output = sim.predict(x_test_dict)
+    print(test_output[pu].shape)
+    plt.figure()
+    plt.plot(test_output[px][0])
+    plt.figure()
+    plt.plot(test_output[pu][0])
+    plt.show()
