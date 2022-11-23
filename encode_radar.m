@@ -8,10 +8,10 @@ n_test = 480;
 % n_test = 2;
 
 % label information files
-train_file_name = "gesture_lsm001_slayer/train1920.txt";
+train_file_name = "gesture_lsm003_slayer/train1920.txt";
 fout_train = fopen(train_file_name, 'w');
 
-test_file_name = "gesture_lsm001_slayer/test480.txt";
+test_file_name = "gesture_lsm003_slayer/test480.txt";
 fout_test = fopen(test_file_name, 'w');
 
 fprintf(fout_train, "#sample\t#class\n");
@@ -19,8 +19,8 @@ fprintf(fout_test, "#sample\t#class\n");
 
 % timestamp files, training
 for ii = 1:n_train
-    in_file_name = sprintf("gesture_lsm_001/gesture_%d.txt", ii-1);
-    out_file_name = sprintf("gesture_lsm001_slayer/%d.bs1", ii);
+    in_file_name = sprintf("gesture_lsm_003/gesture_%d.txt", ii);
+    out_file_name = sprintf("gesture_lsm003_slayer/%d.bs1", ii);
     fin = fopen(in_file_name, 'r');
     
     label = str2num(fgetl(fin)) - 1;
@@ -60,8 +60,8 @@ fclose(fout_train);
 
 % timestamp files, testing
 for ii = (n_train + 1):n_total
-    in_file_name = sprintf("gesture_lsm_001/gesture_%d.txt", ii-1);
-    out_file_name = sprintf("gesture_lsm001_slayer/%d.bs1", ii);
+    in_file_name = sprintf("gesture_lsm_003/gesture_%d.txt", ii);
+    out_file_name = sprintf("gesture_lsm003_slayer/%d.bs1", ii);
     fin = fopen(in_file_name, 'r');
 
     % from 0 to 11. total 12 labels. 

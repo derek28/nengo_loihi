@@ -13,7 +13,7 @@ from nengo.dists import Uniform
 #from nengo.processes import Piecewise
 
 dt = 0.001
-t_sim = 1.5
+t_sim = 2.0
 total_pts = int(t_sim / dt)
 
 ens_seed = 1
@@ -65,7 +65,6 @@ class InputFunc:
             return self.xdata[self.samp_id, ii, :]
 
 my_input = InputFunc("gesture_2400_1ms.txt")
-my_input.set_id(1000)
 
 model = nengo.Network(label="lsm")
 with model:
@@ -86,9 +85,9 @@ with model:
     #inp = nengo.Node(np.zeros(6))
     #outp = nengo.Node(size_in=n_outputs)
     
-    gain = 1/100 # normalize by average firing rate
-    in_density = 0.4
-    lsm_density = 0.4
+    gain = 0.01 # normalize by average firing rate
+    in_density = 0.3
+    lsm_density = 0.7
     n_in_conn = int(in_density * n_neurons)
     n_lsm_conn = int(lsm_density * n_neurons) 
     # initialize input connection to the reservoir
@@ -99,6 +98,7 @@ with model:
             neuron_sel = randint(0, n_neurons - 1)
             w_in[neuron_sel, 2 * i] = weight
             w_in[neuron_sel, 2 * i + 1] = -weight
+    #w_in *= 0.1
     
     #w_bias = rand(n_neurons, 1) - 0.5
     w_bias = np.zeros((n_neurons, 1))
@@ -117,7 +117,7 @@ with model:
     #w_out = rand(n_outputs, n_neurons) - 0.5
     
     nengo.Connection(inp, pool.neurons, transform=w_in)
-    nengo.Connection(pool.neurons, pool.neurons, transform=w_pool, synapse=0.1)
+    nengo.Connection(pool.neurons, pool.neurons, transform=w_pool, synapse=0.05)
     #nengo.Connection(pool.neurons, outp, transform=w_out)
 
     # Indicate which values to record
@@ -126,9 +126,9 @@ with model:
     #out_probe_filt = nengo.Probe(outp, synapse=0.03)
     #out_probe = nengo.Probe(outp, synapse=0)
 
-write_file = True
+write_file = False
 batch_size = 40
-for i in range(60):
+for i in range(1):
     print("Batch #%d." % i)
     with nengo_dl.Simulator(model, minibatch_size=batch_size) as sim:
     # batch processing. shape: (minibatch_size, n_steps, node_size)
@@ -139,7 +139,7 @@ for i in range(60):
             for j in range(batch_size):
                 samp = batch_size * i + j 
                 print("Sample #%d" % samp)
-                filename = "gesture_lsm_002/gesture_" + str(samp) + ".txt"
+                filename = "gesture_lsm_003/gesture_" + str(samp+1) + ".txt"
                 with open(filename, "w") as out_file:
                     out_file.write(str(int(my_input.ydata[samp])) + "\n")   # line 1 for label. 
                     dat = sim.data[pool_neuron_probe][j]
@@ -151,7 +151,7 @@ for i in range(60):
                                 out_file.write(str(l) + ' ' + str(ts) +"\n")
 
 # plot sample output. label wrong for batch_size > 1
-for i in range(6):
+for i in range(5):
     plt.figure()
     rasterplot(sim.trange(), sim.data[in_probe][i])
     plt.title("%d" % int(my_input.ydata[i]))
